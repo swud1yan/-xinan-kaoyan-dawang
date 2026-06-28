@@ -1,0 +1,739 @@
+﻿import 'dart:convert';
+import 'dart:math' as math;
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'widgets/app/bottom_nav.dart';
+
+void main() => runApp(const XinanApp());
+
+const kBaseUrl = 'http://47.109.155.140:8000';
+const kWsUrl = 'ws://47.109.155.140:8000/ws/chat';
+
+const kInk = Color(0xFF1C1917), kPaper = Color(0xFFFDFBF7), kParchment = Color(0xFFF5F2EB);
+const kForest = Color(0xFF1B3A2D), kMoss = Color(0xFF2D5A4B), kBrass = Color(0xFFC4956A);
+const kClay = Color(0xFF8B6F5E), kMist = Color(0xFFE8E3D7), kRed = Color(0xFFB91C1C);
+
+// ======================== API ========================
+class Api {
+  static String? _token;
+  static Map<String, String> get _headers => {
+    'Content-Type': 'application/json; charset=utf-8',
+    if (_token != null) 'Authorization': 'Bearer $_token',
+  };
+
+  static dynamic _decode(http.Response r) {
+    if (r.statusCode >= 400) {
+      try {
+        final d = jsonDecode(r.body);
+        throw ApiError(d['detail']?.toString() ?? 'Error ${r.statusCode}');
+      } catch (e) {
+        if (e is ApiError) rethrow;
+        throw ApiError('Error ${r.statusCode}');
+      }
+    }
+    return jsonDecode(r.body);
+  }
+
+  static Future<dynamic> _post(String path, Map body) async {
+    final r = await http.post(Uri.parse('$kBaseUrl$path'), headers: _headers, body: jsonEncode(body)).timeout(const Duration(seconds: 30));
+    return _decode(r);
+  }
+
+  static Future<dynamic> _get(String path, {Map<String,String>? params}) async {
+    var url = '$kBaseUrl$path';
+    if (params != null && params.isNotEmpty) url += '?${params.entries.map((e)=>'${e.key}=${Uri.encodeComponent(e.value)}').join('&')}';
+    final r = await http.get(Uri.parse(url), headers: _headers).timeout(const Duration(seconds: 15));
+    return _decode(r);
+  }
+
+  static Future<void> _del(String path) async {
+    await http.delete(Uri.parse('$kBaseUrl$path'), headers: _headers).timeout(const Duration(seconds: 10));
+  }
+
+  static Future<dynamic> _put(String path, Map body) async {
+    final r = await http.put(Uri.parse('$kBaseUrl$path'), headers: _headers, body: jsonEncode(body)).timeout(const Duration(seconds: 15));
+    return _decode(r);
+  }
+
+  // Auth
+  static Future<Map> checkDawangId(String id) async { final d = await _post('/auth/check-dawang-id', {'dawang_id': id}); return d as Map; }
+  static Future<Map> register(Map body) async { final d = await _post('/auth/register', body); return d as Map; }
+  static Future<Map> login(String u, String p) async { final d = await _post('/auth/login', {'username': u, 'password': p}); return d as Map; }
+  static Future<Map> forgotPassword(String phone, String pw) async { final d = await _post('/auth/forgot-password', {'phone': phone, 'new_password': pw}); return d as Map; }
+  static Future<void> changePassword(String o, String n) async { await _put('/auth/change-password', {'old_password': o, 'new_password': n}); }
+  static Future<void> changeDawangId(String n) async { await _put('/auth/change-dawang-id', {'new_dawang_id': n}); }
+  static Future<Map> getMe() async { final d = await _get('/auth/me'); return d as Map; }
+  static Future<Map> getAiSummary() async { final d = await _get('/auth/ai-summary'); return d as Map; }
+  static Future<Map> generateAiSummary() async { final d = await _post('/auth/ai-summary', {}); return d as Map; }
+
+  // Schools
+  static Future<Map> getSchools({String? province, String? tag, String? search, int page=1}) async {
+    final p = <String,String>{'page': page.toString(), 'page_size': '30'};
+    if (province != null) p['province'] = province;
+    if (tag != null) p['tag'] = tag;
+    if (search != null) p['search'] = search;
+    final d = await _get('/schools', params: p); return d as Map;
+  }
+  static Future<Map> getSchoolDetail(String id, {String? userMajor}) async {
+    final p = <String,String>{};
+    if (userMajor != null && userMajor.isNotEmpty) p['user_major'] = userMajor;
+    final d = await _get('/schools/$id', params: p.isNotEmpty ? p : null); return d as Map;
+  }
+  static Future<List<String>> getProvinces() async { final d = await _get('/schools/provinces'); return (d as List).cast<String>(); }
+  static Future<List> getUnifiedSchools(String exam) async { final d = await _get('/schools/unified/$exam'); return d as List; }
+
+  // Catalog
+  static Future<List> getSubjectTree() async { final d = await _get('/catalog/subjects'); return d as List; }
+  static Future<Map> getUndergradSchools([String? province]) async {
+    final d = await _get('/catalog/undergrad-schools', params: province != null ? {'province': province} : null); return d as Map;
+  }
+
+  // Exam papers
+  static Future<List> getExamPapers({String? subject, int? year}) async {
+    final p = <String,String>{};
+    if (subject != null) p['subject'] = subject;
+    if (year != null) p['year'] = year.toString();
+    final d = await _get('/exam-papers', params: p.isNotEmpty ? p : null); return d as List;
+  }
+  static Future<Map> getExamDetail(String id) async { final d = await _get('/exam-papers/$id'); return d as Map; }
+
+  // Chat
+  static Future<String> chatSend(String msg) async { final d = await _post('/chat/send', {'message': msg}); return d['reply'] ?? ''; }
+
+  // Posts
+  static Future<Map> getPosts({int page=1}) async { final d = await _get('/posts', params: {'page': page.toString()}); return d as Map; }
+  static Future<Map> createPost(String c) async { final d = await _post('/posts', {'content': c}); return d as Map; }
+  static Future<Map> toggleLike(String pid) async { final d = await _post('/posts/$pid/likes', {}); return d as Map; }
+  static Future<List> getComments(String pid) async { final d = await _get('/posts/$pid/comments'); return d as List; }
+  static Future<Map> addComment(String pid, String c) async { final d = await _post('/posts/$pid/comments', {'content': c}); return d as Map; }
+
+  // Friends
+  static Future<List> getFriends() async { final d = await _get('/friends'); return d as List; }
+  static Future<List> getFriendRequests() async { final d = await _get('/friends/requests'); return d as List; }
+  static Future<void> sendFriendRequest(String did) async { await _post('/friends/request', {'dawang_id': did}); }
+  static Future<void> acceptRequest(String id) async { await _put('/friends/$id/accept', {}); }
+  static Future<void> removeFriend(String id) async { await _del('/friends/$id'); }
+  static Future<Map> searchDawangId(String q) async { final d = await _get('/friends/search', params: {'q': q}); return d as Map; }
+  static Future<List> getMessages(String fid) async { final d = await _get('/friends/messages/$fid'); return d as List; }
+}
+
+class ApiError implements Exception { final String message; ApiError(this.message); @override String toString() => message; }
+
+// ======================== App ========================
+class XinanApp extends StatelessWidget {
+  const XinanApp({super.key});
+  @override Widget build(BuildContext c) => MaterialApp(
+    debugShowCheckedModeBanner: false, title: '西南大王',
+    theme: ThemeData(
+      useMaterial3: true, scaffoldBackgroundColor: kParchment,
+      colorScheme: ColorScheme.fromSeed(seedColor: kForest, brightness: Brightness.light),
+      textTheme: const TextTheme(
+        headlineMedium: TextStyle(fontSize:24,fontWeight:FontWeight.w700,letterSpacing:-0.3,height:1.2,color:kInk),
+        titleLarge: TextStyle(fontSize:20,fontWeight:FontWeight.w700,height:1.25,color:kInk),
+        titleMedium: TextStyle(fontSize:16,fontWeight:FontWeight.w600,height:1.3,color:kInk),
+        bodyLarge: TextStyle(fontSize:15,height:1.6,color:kInk),
+        bodyMedium: TextStyle(fontSize:13.5,height:1.55,color:kClay),
+      ),
+      inputDecorationTheme: InputDecorationTheme(filled:true,fillColor:kPaper,contentPadding:const EdgeInsets.symmetric(horizontal:16,vertical:14),border:OutlineInputBorder(borderRadius:BorderRadius.circular(10),borderSide:const BorderSide(color:kMist)),enabledBorder:OutlineInputBorder(borderRadius:BorderRadius.circular(10),borderSide:const BorderSide(color:kMist)),focusedBorder:OutlineInputBorder(borderRadius:BorderRadius.circular(10),borderSide:const BorderSide(color:kForest,width:1.5))),
+    ),
+    home: const AppRoot(),
+  );
+}
+
+// ======================== Root ========================
+class AppRoot extends StatefulWidget { const AppRoot({super.key}); @override State<AppRoot> createState() => _AppRootState(); }
+class _AppRootState extends State<AppRoot> {
+  Map? _user; bool _loading=true;
+  @override void initState() { super.initState(); _load(); }
+  Future<void> _load() async {
+    final p = await SharedPreferences.getInstance();
+    final token = p.getString('xinan_token');
+    final u = p.getString('xinan_user');
+    if (token != null && u != null) { Api._token = token; try { _user = jsonDecode(u); } catch(_) {} }
+    if (mounted) setState(()=>_loading=false);
+  }
+  Future<void> _saveLogin(Map r) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('xinan_token', r['token']);
+    await p.setString('xinan_user', jsonEncode(r['user']));
+    Api._token = r['token'];
+    if (mounted) setState(()=>_user=r['user']);
+  }
+  Future<void> _logout() async {
+    final p = await SharedPreferences.getInstance();
+    await p.remove('xinan_token'); await p.remove('xinan_user');
+    Api._token = null; if (mounted) setState(()=>_user=null);
+  }
+  @override Widget build(BuildContext c) {
+    if (_loading) return const Scaffold(body:Center(child:CircularProgressIndicator(color:kForest)));
+    if (_user==null) return AuthGate(onLogin:(r)=>_saveLogin(r));
+    return MainShell(user:_user!, onLogout:_logout);
+  }
+}
+
+// ======================== Auth Gate ========================
+class AuthGate extends StatefulWidget {
+  final ValueChanged<Map> onLogin;
+  const AuthGate({super.key,required this.onLogin});
+  @override State<AuthGate> createState() => _AuthGateState();
+}
+class _AuthGateState extends State<AuthGate> {
+  bool _reg=false, _forgot=false;
+  @override Widget build(BuildContext c) {
+    if (_forgot) return ForgotPasswordPage(onBack:()=>setState(()=>_forgot=false));
+    if (_reg) return RegisterFlow(onDone:(r){widget.onLogin(r);});
+    return LoginPage(onLogin:(r){widget.onLogin(r);},onReg:()=>setState(()=>_reg=true),onForgot:()=>setState(()=>_forgot=true));
+  }
+}
+
+// ======================== Login ========================
+class LoginPage extends StatefulWidget {
+  final ValueChanged<Map> onLogin; final VoidCallback onReg, onForgot;
+  const LoginPage({super.key,required this.onLogin,required this.onReg,required this.onForgot});
+  @override State<LoginPage> createState() => _LoginPageState();
+}
+class _LoginPageState extends State<LoginPage> {
+  final _u=TextEditingController(),_p=TextEditingController(); String? _e; bool _b=false;
+  Future<void> _go() async {
+    if(_u.text.trim().isEmpty||_p.text.length<6){setState(()=>_e='用户名不能为空，密码至少6位');return;}
+    setState((){_b=true;_e=null;});
+    try{final r=await Api.login(_u.text.trim(),_p.text.trim());widget.onLogin(r);}on ApiError catch(e){setState(()=>_e=e.message);}catch(_){setState(()=>_e='网络连接失败');}
+    setState(()=>_b=false);
+  }
+  @override Widget build(BuildContext c)=>Scaffold(body:SafeArea(child:Center(child:SingleChildScrollView(padding:const EdgeInsets.all(24),child:Container(width:400,padding:const EdgeInsets.all(32),decoration:BoxDecoration(color:kPaper,borderRadius:BorderRadius.circular(16),border:Border.all(color:kMist)),child:Column(mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+    const Icon(Icons.castle_outlined,color:kForest,size:40),const SizedBox(height:16),
+    const Text('西南大王',textAlign:TextAlign.center,style:TextStyle(fontSize:28,fontWeight:FontWeight.w800,color:kInk,letterSpacing:-0.5)),
+    const SizedBox(height:4),const Text('考研人的一站式伙伴',textAlign:TextAlign.center,style:TextStyle(color:kClay,fontSize:14)),
+    const SizedBox(height:32),
+    TextField(controller:_u,decoration:const InputDecoration(labelText:'用户名',prefixIcon:Icon(Icons.person_outline))),
+    const SizedBox(height:14),
+    TextField(controller:_p,obscureText:true,decoration:const InputDecoration(labelText:'密码',prefixIcon:Icon(Icons.lock_outline)),onSubmitted:(_)=>_go()),
+    if(_e!=null)Padding(padding:const EdgeInsets.only(top:12),child:Text(_e!,style:const TextStyle(color:kRed,fontSize:13))),
+    const SizedBox(height:24),
+    FilledButton(onPressed:_b?null:_go,style:FilledButton.styleFrom(backgroundColor:kForest,padding:const EdgeInsets.symmetric(vertical:14),shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(10))),child:Text(_b?'登录中…':'登录',style:const TextStyle(fontSize:16))),
+    const SizedBox(height:12),
+    OutlinedButton(onPressed:widget.onReg,style:OutlinedButton.styleFrom(padding:const EdgeInsets.symmetric(vertical:14),shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(10))),child:const Text('注册新账号',style:TextStyle(fontSize:16,color:kForest))),
+    TextButton(onPressed:widget.onForgot,child:const Text('忘记密码？',style:TextStyle(color:kClay))),
+  ]))))));
+  @override void dispose(){_u.dispose();_p.dispose();super.dispose();}
+}
+
+// ======================== Forgot Password ========================
+class ForgotPasswordPage extends StatefulWidget {
+  final VoidCallback onBack;
+  const ForgotPasswordPage({super.key,required this.onBack});
+  @override State<ForgotPasswordPage> createState() => _ForgotPasswordPageState();
+}
+class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
+  final _ph=TextEditingController(),_pw=TextEditingController(); String? _e,_ok; bool _b=false;
+  Future<void> _go() async {
+    if(_ph.text.trim().length!=11){setState(()=>_e='请输入11位手机号');return;}
+    if(_pw.text.length<6){setState(()=>_e='新密码至少6位');return;}
+    setState((){_b=true;_e=null;});
+    try{await Api.forgotPassword(_ph.text.trim(),_pw.text.trim());setState(()=>_ok='密码已重置，请返回登录');}on ApiError catch(e){setState(()=>_e=e.message);}catch(_){setState(()=>_e='网络连接失败');}
+    setState(()=>_b=false);
+  }
+  @override Widget build(BuildContext c)=>Scaffold(body:SafeArea(child:Center(child:SingleChildScrollView(padding:const EdgeInsets.all(24),child:Container(width:400,padding:const EdgeInsets.all(32),decoration:BoxDecoration(color:kPaper,borderRadius:BorderRadius.circular(16),border:Border.all(color:kMist)),child:Column(mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+    const Text('忘记密码',textAlign:TextAlign.center,style:TextStyle(fontSize:24,fontWeight:FontWeight.w800)),const SizedBox(height:8),
+    const Text('输入注册时绑定的手机号',textAlign:TextAlign.center,style:TextStyle(color:kClay,fontSize:14)),const SizedBox(height:24),
+    TextField(controller:_ph,keyboardType:TextInputType.phone,maxLength:11,decoration:const InputDecoration(labelText:'手机号',prefixIcon:Icon(Icons.phone_android))),
+    const SizedBox(height:12),
+    TextField(controller:_pw,obscureText:true,decoration:const InputDecoration(labelText:'新密码',prefixIcon:Icon(Icons.lock_outline))),
+    if(_e!=null)Padding(padding:const EdgeInsets.only(top:12),child:Text(_e!,style:const TextStyle(color:kRed))),
+    if(_ok!=null)Padding(padding:const EdgeInsets.only(top:12),child:Text(_ok!,style:const TextStyle(color:kForest))),
+    const SizedBox(height:24),
+    FilledButton(onPressed:_b?null:_go,style:FilledButton.styleFrom(backgroundColor:kForest,padding:const EdgeInsets.symmetric(vertical:14),shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(10))),child:Text(_b?'处理中…':'重置密码',style:const TextStyle(fontSize:16))),
+    const SizedBox(height:12),
+    OutlinedButton(onPressed:widget.onBack,style:OutlinedButton.styleFrom(padding:const EdgeInsets.symmetric(vertical:14),shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(10))),child:const Text('返回登录',style:TextStyle(fontSize:16,color:kForest))),
+  ]))))));
+  @override void dispose(){_ph.dispose();_pw.dispose();super.dispose();}
+}
+
+// ======================== Register Flow ========================
+enum StudyStyle { fast, steady, slow }
+String styleLabel(StudyStyle s) => const {'fast':'速战速决','steady':'稳扎稳打','slow':'慢慢来'}[s.name]!;
+String styleDesc(StudyStyle s) => const {'fast':'集中火力，高强度短期冲刺','steady':'按部就班，半年到一年系统备考','slow':'细水长流，拉长战线从容准备'}[s.name]!;
+
+class RegisterFlow extends StatefulWidget {
+  final ValueChanged<Map> onDone;
+  const RegisterFlow({super.key,required this.onDone});
+  @override State<RegisterFlow> createState() => _RegisterFlowState();
+}
+class _RegisterFlowState extends State<RegisterFlow> {
+  final _pc=PageController(); int _step=0; bool _anim=false,_loading=false;
+  final _did=TextEditingController(),_nick=TextEditingController(),_pw=TextEditingController(),_phone=TextEditingController();
+  bool _didOk=false,_checkingDid=false; String? _didErr;
+  String _ugProvince='',_ugSchool='',_grade='',_major='';
+  bool _hasTarget=false,_ugPrivate=false; String? _target,_direction,_progress,_score; StudyStyle _style=StudyStyle.steady;
+
+  @override void initState(){super.initState();WidgetsBinding.instance.addPostFrameCallback((_)=>setState(()=>_anim=true));}
+  void _next(){
+    if (_step == 0) {
+      if (_did.text.trim().length < 4) { _showErr('大王号至少4个字符'); return; }
+      if (_nick.text.trim().isEmpty) { _showErr('请填写昵称'); return; }
+      if (_pw.text.length < 6) { _showErr('密码至少6位'); return; }
+    }
+    if(_step<8){_pc.nextPage(duration:const Duration(milliseconds:500),curve:Curves.easeInOut);setState(()=>_step++);}
+  }
+  void _prev(){if(_step>0){_pc.previousPage(duration:const Duration(milliseconds:400),curve:Curves.easeInOut);setState(()=>_step--);}}
+  void _showErr(String msg) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2))); }
+
+  Future<void> _checkDid() async {
+    final t=_did.text.trim();
+    if(t.length<4||t.length>15){setState((){_didOk=false;_checkingDid=false;_didErr=null;});return;}
+    setState((){_checkingDid=true;_didOk=false;_didErr=null;});
+    try{final r=await Api.checkDawangId(t);if(mounted)setState((){_didOk=r['available']==true;_didErr=_didOk?null:'该大王号已被占用';});}catch(_){if(mounted)setState(()=>_didErr='网络错误请重试');}
+    if(mounted)setState(()=>_checkingDid=false);
+  }
+
+  Future<void> _finish() async {
+    if(_loading)return;setState(()=>_loading=true);
+    try{
+      final body={'dawang_id':_did.text.trim(),'nickname':_nick.text.trim(),'username':_did.text.trim(),'password':_pw.text.trim(),
+        'phone':_phone.text.trim().isNotEmpty?_phone.text.trim():null,'grade':_grade.isNotEmpty?_grade:null,'major':_major.isNotEmpty?_major:null,
+        'hasTarget':_hasTarget,'targetSchool':_target,'direction':_direction,'currentProgress':_progress,'estimatedScore':_score,
+        'studyStyle':_style.name,'undergradProvince':_ugProvince.isNotEmpty?_ugProvince:null,'undergradSchool':_ugSchool.isNotEmpty?_ugSchool:null,
+        'undergradPrivate':_ugPrivate};
+      final r=await Api.register(body);
+      try{await Api.generateAiSummary();}catch(_){}
+      widget.onDone(r);
+    }on ApiError catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(e.message)));}
+    catch(_){if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('网络连接失败')));}
+    setState(()=>_loading=false);
+  }
+
+  @override Widget build(BuildContext c)=>Scaffold(body:SafeArea(child:Column(children:[
+    Padding(padding:const EdgeInsets.fromLTRB(24,16,24,0),child:Row(children:[if(_step>0)IconButton(icon:const Icon(Icons.arrow_back),onPressed:_prev,iconSize:20),const Spacer(),Text('${_step+1}/9',style:const TextStyle(color:kClay,fontSize:13))])),
+    Expanded(child:PageView(controller:_pc,physics:const NeverScrollableScrollPhysics(),children:[_s0(),_s1(),_s2(),_s3(),_s4(),_s5(),_s6(),_s7(),_s8()])),
+  ])));
+
+  Widget _wrap(Widget? icon,String t,String sub,Widget body,{bool anim=false,bool expand=false})=>Padding(padding:const EdgeInsets.symmetric(horizontal:24),child:expand?Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const SizedBox(height:20),if(icon!=null)icon,if(icon!=null)const SizedBox(height:16),Text(t,style:const TextStyle(fontSize:26,fontWeight:FontWeight.w800,color:kInk)),if(sub.isNotEmpty)const SizedBox(height:6),Text(sub,style:const TextStyle(fontSize:14,color:kClay)),const SizedBox(height:16),Expanded(child:body)]):SingleChildScrollView(child:AnimatedOpacity(opacity:_anim?1:0,duration:Duration(milliseconds:anim?1000:300),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const SizedBox(height:20),if(icon!=null)icon,if(icon!=null)const SizedBox(height:16),Text(t,style:const TextStyle(fontSize:26,fontWeight:FontWeight.w800,color:kInk)),if(sub.isNotEmpty)const SizedBox(height:6),Text(sub,style:const TextStyle(fontSize:14,color:kClay)),const SizedBox(height:24),body]))));
+  final _btn=FilledButton.styleFrom(backgroundColor:kForest,padding:const EdgeInsets.symmetric(vertical:14),shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(10)));
+
+  Widget _s0()=>_wrap(null,'创建大王号','大王号是你在西南大王的唯一标识，4-15字符，用于添加好友',Column(children:[
+    TextField(controller:_did,onChanged:(_)=>_checkDid(),decoration:InputDecoration(labelText:'大王号',prefixIcon:const Icon(Icons.tag),
+      suffixIcon:_checkingDid?const SizedBox(width:20,height:20,child:Center(child:SizedBox(width:18,height:18,child:CircularProgressIndicator(strokeWidth:2)))):_didOk?const Icon(Icons.check_circle,color:kForest):_did.text.trim().length>=4?const Icon(Icons.cancel,color:kRed):null,
+      helperText:_didErr??'4-15个字符，英文字母或数字',helperStyle:TextStyle(color:_didErr!=null?kRed:kClay))),
+    const SizedBox(height:14),
+    TextField(controller:_nick,decoration:const InputDecoration(labelText:'昵称',prefixIcon:Icon(Icons.face),helperText:'对外展示的名字')),
+    const SizedBox(height:14),
+    TextField(controller:_pw,obscureText:true,decoration:const InputDecoration(labelText:'密码（至少6位）',prefixIcon:Icon(Icons.lock_outline))),
+    const SizedBox(height:24),
+    FilledButton(onPressed: _next, style: _btn, child: const Text('下一步')),
+  ]));
+
+  Widget _s1()=>_wrap(null,'绑定手机号','用于找回密码，可不填',Column(children:[
+    TextField(controller:_phone,keyboardType:TextInputType.phone,maxLength:11,decoration:const InputDecoration(labelText:'手机号（选填）',prefixIcon:Icon(Icons.phone_android))),const SizedBox(height:24),
+    FilledButton(onPressed:_next,style:_btn,child:const Text('下一步')),
+  ]));
+
+  Widget _s2()=>_wrap(null,'本科院校','选择你在云贵川渝的本科院校',Column(children:[
+    if(_ugProvince.isEmpty)Column(children:[for(final p in ['重庆','四川','云南','贵州'])ListTile(title:Text(p),leading:const Icon(Icons.location_on_outlined,color:kForest),onTap:()=>setState(()=>_ugProvince=p),shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(8)))]),
+    if(_ugProvince.isNotEmpty&&_ugSchool.isEmpty)...[
+      ListTile(title:Text('省份: $_ugProvince',style:const TextStyle(fontWeight:FontWeight.w700)),leading:const Icon(Icons.check_circle,color:kForest),trailing:TextButton(onPressed:()=>setState((){_ugProvince='';}),child:const Text('重选'))),
+      FutureBuilder<Map>(future:Api.getUndergradSchools(_ugProvince),builder:(c,snap){
+        if(!snap.hasData)return const Center(child:CircularProgressIndicator(color:kForest));
+        final schools=(snap.data!['schools']?[_ugProvince]??[]) as List;
+        return Column(children:schools.map((s)=>ListTile(title:Text(s['name']??''),subtitle:Text('${s['city']??''} · ${s['type']??''}'),onTap:(){setState(()=>_ugSchool=s['name']??'');},shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(8)))).toList());
+      }),
+    ],
+    if(_ugSchool.isNotEmpty)...[
+      ListTile(title:Text(_ugSchool,style:const TextStyle(fontWeight:FontWeight.w700)),subtitle:Text(_ugProvince),
+        leading:const Icon(Icons.school,color:kForest),trailing:TextButton(onPressed:()=>setState((){_ugSchool='';}),child:const Text('重选'))),
+      SwitchListTile(title:const Text('保密我的本科院校'),value:_ugPrivate,onChanged:(v)=>setState(()=>_ugPrivate=v)),
+      const SizedBox(height:16),FilledButton(onPressed:_next,style:_btn,child:const Text('下一步')),
+    ],
+  ]));
+
+  Widget _s3()=>_wrap(null,'您目前大几？','',Column(children:[
+    for(final x in ['大一','大二','大三','大四 / 应届','已毕业 / 往届生'])Padding(padding:const EdgeInsets.only(bottom:10),child:ListTile(title:Text(x,style:TextStyle(fontWeight:FontWeight.w600,fontSize:16,color:_grade==x?kForest:kInk)),leading:Container(width:22,height:22,decoration:BoxDecoration(shape:BoxShape.circle,color:_grade==x?kForest:Colors.transparent,border:Border.all(color:_grade==x?kForest:kMist,width:2)),child:_grade==x?const Icon(Icons.check,size:13,color:Colors.white):null),onTap:(){_grade=x;_next();},shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(10)),tileColor:_grade==x?kParchment:kPaper)),
+  ]));
+
+  Widget _s4()=>_wrap(null,'专业方向','选择你的考研学科方向',Column(children:[
+    Expanded(child:FutureBuilder<List>(future:Api.getSubjectTree(),builder:(c,snap){
+      if(!snap.hasData)return const Center(child:CircularProgressIndicator(color:kForest));
+      return ListView(children:snap.data!.map((cat)=>ExpansionTile(title:Text(cat['name']??'',style:const TextStyle(fontWeight:FontWeight.w700)),children:(cat['children']as List?)?.map((ch)=>ListTile(title:Text(ch['name']??''),onTap:(){setState(()=>_major=(ch['name']??''));_next();})).toList()??[])).toList());
+    })),
+  ]),expand:true);
+
+  Widget _s5()=>_wrap(null,'目标院校','设定考研目标院校（可在择校页面随时更改）',Column(children:[
+    ListTile(title:const Text('有明确目标院校'),leading:const Icon(Icons.school_outlined,color:kForest),onTap:(){_hasTarget=true;_next();},shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(8))),
+    ListTile(title:const Text('还没有，帮我推荐'),leading:const Icon(Icons.search_outlined,color:kClay),onTap:(){_hasTarget=false;_next();},shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(8))),
+  ]));
+
+  Widget _s6()=>_hasTarget?_targetPicker():_wrap(null,'考研方向与现状','',Column(children:[
+    _q('想报考的方向？',['计算机/软件/AI','电子信息/通信','数学/物理','文科/教育','经管/金融','不确定'],_direction??'',(v)=>_direction=v),
+    const SizedBox(height:20),_q('当前备考进度？',['还没开始','刚开始了解','已确定院校','专业课也开始了','已进入刷题阶段'],_progress??'',(v)=>_progress=v),
+    const SizedBox(height:20),_q('预估当前水平？',['基础薄弱','有一定基础','基础较好','基础扎实'],_score??'',(v)=>_score=v),
+    const SizedBox(height:24),FilledButton(onPressed:_direction!=null&&_progress!=null&&_score!=null?_next:null,style:_btn,child:const Text('下一步')),
+  ]));
+
+  Widget _targetPicker()=>_wrap(null,'选择目标院校','',Column(children:[
+    Expanded(child:FutureBuilder<Map>(future:Api.getSchools(page:1),builder:(c,snap){
+      if(!snap.hasData)return const Center(child:CircularProgressIndicator(color:kForest));
+      final schools=(snap.data!['schools'] as List?)??[];
+      return ListView(children:schools.map((s)=>ListTile(title:Text(s['name']??''),subtitle:Text('${s['province']??''} · ${(s['tags'] as List?)?.join(',')??''}'),onTap:(){setState(()=>_target=s['name']);_next();})).toList());
+    })),
+  ]),expand:true);
+
+  Widget _s7()=>_wrap(null,'您想怎么备考？','选择备考节奏',Column(children:[
+    for(final s in [{'k':'fast','l':'速战速决','d':'集中火力，高强度短期冲刺'},{'k':'steady','l':'稳扎稳打','d':'按部就班，半年到一年系统备考'},{'k':'slow','l':'慢慢来','d':'细水长流，拉长战线从容准备'}])
+      Container(margin:const EdgeInsets.only(bottom:12),child:ListTile(contentPadding:const EdgeInsets.symmetric(horizontal:16,vertical:8),title:Text(s['l']!,style:TextStyle(fontWeight:FontWeight.w700,fontSize:17,color:_style.name==s['k']?kForest:kInk)),subtitle:Text(s['d']!,style:const TextStyle(fontSize:13,color:kClay)),leading:Container(width:24,height:24,decoration:BoxDecoration(shape:BoxShape.circle,color:_style.name==s['k']?kForest:Colors.transparent,border:Border.all(color:_style.name==s['k']?kForest:kMist,width:2)),child:_style.name==s['k']?const Icon(Icons.check,size:14,color:Colors.white):null),onTap:()=>setState((){_style=s['k']=='fast'?StudyStyle.fast:s['k']=='slow'?StudyStyle.slow:StudyStyle.steady;}),shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(12)),tileColor:_style.name==s['k']?kParchment:kPaper)),
+    const SizedBox(height:16),FilledButton(onPressed:_next,style:_btn,child:const Text('下一步')),
+  ]));
+
+  Widget _s8()=>_wrap(const Icon(Icons.auto_awesome,color:kBrass,size:48),'准备完毕！','AI将为你分析考研方向并提供个性化推荐',Column(children:[
+    const SizedBox(height:8),const Text('注册完成后AI将分析你的考研方向',style:TextStyle(color:kClay,fontSize:14)),const SizedBox(height:32),
+    FilledButton(onPressed:_loading?null:_finish,style:_btn,child:Text(_loading?'注册中…':'完成注册，开启考研之旅')),
+  ]),anim:true);
+
+  Widget _q(String t,List<String> o,String cur,ValueChanged<String> on)=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(t,style:const TextStyle(fontSize:14,fontWeight:FontWeight.w600,color:kInk)),const SizedBox(height:8),Wrap(spacing:8,runSpacing:8,children:o.map((x)=>GestureDetector(onTap:(){setState(()=>on(x));},child:Container(padding:const EdgeInsets.symmetric(horizontal:14,vertical:8),decoration:BoxDecoration(color:cur==x?kForest:kPaper,borderRadius:BorderRadius.circular(20),border:Border.all(color:cur==x?kForest:kMist)),child:Text(x,style:TextStyle(fontSize:13,color:cur==x?Colors.white:kClay,fontWeight:cur==x?FontWeight.w600:FontWeight.w400))))).toList())]);
+
+  @override void dispose(){_did.dispose();_nick.dispose();_pw.dispose();_phone.dispose();_pc.dispose();super.dispose();}
+}
+
+// ======================== Main Shell ========================
+class MainShell extends StatefulWidget {
+  final Map user; final VoidCallback onLogout;
+  const MainShell({super.key,required this.user,required this.onLogout});
+  @override State<MainShell> createState() => _MainShellState();
+}
+class _MainShellState extends State<MainShell> {
+  int _tab=0;
+  @override Widget build(BuildContext c){
+    final pages=[SchoolTab(user:widget.user),CourseExamTab(user:widget.user),const ChatTab(),CircleTab(user:widget.user),FriendsTab(user:widget.user),MyTab(user:widget.user,onLogout:widget.onLogout)];
+    return Scaffold(body:SafeArea(child:IndexedStack(index:_tab,children:pages)),bottomNavigationBar: BottomNav(currentIndex: _tab, onTap: (i) => setState(() => _tab = i)));
+  }
+}
+
+// ======================== Shared Widgets ========================
+class Hdr extends StatelessWidget {final String t,s;const Hdr({super.key,required this.t,required this.s});@override Widget build(BuildContext c)=>Padding(padding:const EdgeInsets.fromLTRB(20,20,20,4),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(t,style:Theme.of(c).textTheme.headlineMedium),const SizedBox(height:4),Text(s,style:Theme.of(c).textTheme.bodyMedium)]));}
+Widget tag(String l,{bool a=false,VoidCallback? on})=>GestureDetector(onTap:on,child:Container(padding:const EdgeInsets.symmetric(horizontal:12,vertical:6),decoration:BoxDecoration(color:a?kForest:kPaper,borderRadius:BorderRadius.circular(20),border:Border.all(color:a?kForest:kMist)),child:Text(l,style:TextStyle(fontSize:13,fontWeight:FontWeight.w500,color:a?kPaper:kClay))));
+
+// ======================== Tab 1: Schools ========================
+class SchoolTab extends StatefulWidget {final Map user;const SchoolTab({super.key,required this.user});@override State<SchoolTab>createState()=>_SchoolTabState();}
+class _SchoolTabState extends State<SchoolTab>{
+  String? _province,_tag,_search; List _schools=[]; bool _loading=true; int _page=1;
+  @override void initState(){super.initState();_load();}
+  Future<void> _load()async{try{final r=await Api.getSchools(province:_province,tag:_tag,search:_search,page:_page);setState((){_schools=(r['schools']as List?)??[];_loading=false;});}catch(_){setState(()=>_loading=false);}}
+  @override Widget build(BuildContext c)=>SingleChildScrollView(padding:const EdgeInsets.only(bottom:32),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+    Hdr(t:'择校',s:widget.user['targetSchool']!=null?'你的目标: ${widget.user['targetSchool']}':'全国116所985/211院校'),
+    Padding(padding:const EdgeInsets.symmetric(horizontal:20),child:TextField(decoration:const InputDecoration(hintText:'搜索院校…',prefixIcon:Icon(Icons.search,color:kClay)),onChanged:(v){_search=v.isNotEmpty?v:null;_page=1;_load();})),
+    const SizedBox(height:12),
+    SizedBox(height:34,child:ListView(scrollDirection:Axis.horizontal,padding:const EdgeInsets.symmetric(horizontal:20),children:[for(final x in [null,'985','211','双一流','C9','北京','上海','江苏','湖北','陕西','四川'])Padding(padding:const EdgeInsets.only(right:8),child:tag(x??'全部',a:_tag==x,on:(){setState((){_tag=x;_page=1;_load();});}))])),
+    const SizedBox(height:14),
+    if (_loading)
+      const Center(child: Padding(padding: EdgeInsets.zero, child: CircularProgressIndicator(color: kForest)))
+    else
+      for (final s in _schools) _schoolCard(s),
+  ]));
+  Widget _schoolCard(Map s) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
+      decoration: BoxDecoration(color: kPaper, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: kForest.withAlpha(10), blurRadius: 6, offset: Offset(0, 2))]),
+      child: ListTile(
+        contentPadding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+        leading: Container(width: 40, height: 40, decoration: BoxDecoration(color: kParchment, borderRadius: BorderRadius.circular(10)), child: Center(child: Text((s['name'] ?? '').toString()[0], style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: kForest)))),
+        title: Text(s['name'] ?? '', style: const TextStyle(fontWeight: FontWeight.w700)),
+        subtitle: Text('${s['province'] ?? ''} · ${(s['tags'] as List?)?.join(',') ?? ''}', style: const TextStyle(fontSize: 12, color: kClay)),
+        trailing: const Icon(Icons.chevron_right, color: kClay),
+        onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => SchoolDetailPage(schoolId: s['id'] ?? '', schoolName: s['name'] ?? '', userMajor: widget.user['major']))),
+      ),
+    );
+  }
+}
+
+class SchoolDetailPage extends StatefulWidget {final String schoolId,schoolName;final String? userMajor;const SchoolDetailPage({super.key,required this.schoolId,required this.schoolName,this.userMajor});@override State<SchoolDetailPage>createState()=>_SchoolDetailPageState();}
+class _SchoolDetailPageState extends State<SchoolDetailPage>{Map? _detail;bool _loading=true;
+  @override void initState(){super.initState();_load();}
+  Future<void> _load()async{try{_detail=await Api.getSchoolDetail(widget.schoolId,userMajor:widget.userMajor);}catch(_){}setState(()=>_loading=false);}
+  @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(title:Text(widget.schoolName),backgroundColor:kPaper),body:_loading?const Center(child:CircularProgressIndicator(color:kForest)):_detail==null?const Center(child:Text('加载失败')):SingleChildScrollView(padding:const EdgeInsets.all(20),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+    Text(widget.schoolName,style:const TextStyle(fontSize:24,fontWeight:FontWeight.w800)),
+    const SizedBox(height:4),Text('${_detail!['province']??''} · ${_detail!['schoolType']??''} · ${(_detail!['tags']as List?)?.join(',')??''}',style:const TextStyle(color:kClay)),
+    const SizedBox(height:20),const Text('硕士专业',style:TextStyle(fontSize:18,fontWeight:FontWeight.w700)),
+    for(final p in (_detail!['programs']as List?)??[])Container(margin:const EdgeInsets.only(top:12),padding:const EdgeInsets.all(16),decoration:BoxDecoration(color:kPaper,borderRadius:BorderRadius.circular(12),border:Border.all(color:kMist)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      Row(children:[Expanded(child:Text(p['name']??'',style:const TextStyle(fontWeight:FontWeight.w700,fontSize:16))),Container(padding:const EdgeInsets.symmetric(horizontal:8,vertical:3),decoration:BoxDecoration(color:kParchment,borderRadius:BorderRadius.circular(4)),child:Text(p['degreeType']??'',style:const TextStyle(fontSize:12,color:kBrass))),if(p['isUnified']==true)...[const SizedBox(width:6),Container(padding:const EdgeInsets.symmetric(horizontal:8,vertical:3),decoration:BoxDecoration(color:kForest.withAlpha(30),borderRadius:BorderRadius.circular(4)),child:Text(p['unifiedName']??'统考',style:const TextStyle(fontSize:11,color:kForest)))]],),
+      const SizedBox(height:8),Text('考试科目: ${p['subjects']??''}',style:const TextStyle(fontSize:13,color:kClay)),
+      if((p['lines']as List?)?.isNotEmpty==true)...[const SizedBox(height:12),SizedBox(height:120,child:Row(crossAxisAlignment:CrossAxisAlignment.end,children:[for(final l in (p['lines']as List).reversed.toList())Expanded(child:Padding(padding:const EdgeInsets.symmetric(horizontal:4),child:Column(mainAxisAlignment:MainAxisAlignment.end,children:[Text('${l['total']}',style:const TextStyle(fontSize:12,fontWeight:FontWeight.w700,color:kForest)),Container(height:80*(l['total']-250)/200,color:kForest.withAlpha(120)),const SizedBox(height:4),Text('${l['year']}',style:const TextStyle(fontSize:11,color:kClay))])))]))],
+    ])),
+  ])));
+}
+
+// ======================== Tab 2: Course + Exam ========================
+class CourseExamTab extends StatefulWidget {final Map user;const CourseExamTab({super.key,required this.user});@override State<CourseExamTab>createState()=>_CourseExamTabState();}
+class _CourseExamTabState extends State<CourseExamTab>{int _sub=0;
+  @override Widget build(BuildContext c)=>SingleChildScrollView(padding:const EdgeInsets.only(bottom:32),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+    Hdr(t:'专业课与真题',s:widget.user['targetSchool']!=null?'目标: ${widget.user['targetSchool']}':'考研科目与历年真题'),
+    Padding(padding:const EdgeInsets.symmetric(horizontal:20),child:Row(children:[
+      Expanded(child:FilterChip(label:const Text('专业课'),selected:_sub==0,onSelected:(_)=>setState(()=>_sub=0))),
+      Expanded(child:FilterChip(label:const Text('公共课真题'),selected:_sub==1,onSelected:(_)=>setState(()=>_sub=1))),
+      if(widget.user['hasTarget']==true)Expanded(child:FilterChip(label:const Text('目标院校专业课'),selected:_sub==2,onSelected:(_)=>setState(()=>_sub=2))),
+    ])),
+    if(_sub==0)...[_courseCard('408计算机学科专业基础综合','全国统考',['数据结构','计算机组成原理','操作系统','计算机网络'],['《数据结构》严蔚敏','《计算机组成原理》唐朔飞','《计算机操作系统》汤子瀛','《计算机网络》谢希仁'],'满分150分，选择题80分+综合题70分'),_courseCard('思想政治理论','全国统考',['马原','毛中特','史纲','思修法基'],['《大纲解析》','《肖秀荣1000题》','《肖八》','《肖四》'],'满分100分'),_courseCard('英语一','全国统考',['完形填空','阅读理解','新题型','翻译','写作'],['《红宝书》','《张剑黄皮书》','《王江涛写作》'],'满分100分'),_courseCard('数学一','全国统考',['高等数学(60%)','线性代数(20%)','概率论(20%)'],['《高等数学》同济版','《线性代数》同济版','《概率论》浙大版','《李永乐复习全书》'],'满分150分')],
+    if(_sub==1)_examList(),if(_sub==2)_examList(),
+  ]));
+  Widget _courseCard(String n, String tp, List<String> top, List<String> bks, String desc) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(color: kPaper, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: kForest.withAlpha(10), blurRadius: 6, offset: Offset(0, 2))]),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: Text(n, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 17))),
+          Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3), decoration: BoxDecoration(color: kParchment, borderRadius: BorderRadius.circular(4)), child: Text(tp, style: const TextStyle(fontSize: 12, color: kBrass))),
+        ]),
+        const SizedBox(height: 10),
+        Text(desc, style: const TextStyle(fontSize: 13, color: kClay)),
+        const SizedBox(height: 10),
+        Wrap(spacing: 6, children: top.map((t) => Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5), decoration: BoxDecoration(color: kParchment, borderRadius: BorderRadius.circular(6)), child: Text(t, style: const TextStyle(fontSize: 13)))).toList()),
+        const SizedBox(height: 12),
+        const Text('推荐书目', style: TextStyle(fontWeight: FontWeight.w600, color: kForest)),
+        ...bks.map((b) => Padding(padding: const EdgeInsets.only(bottom: 4), child: Row(children: [const Icon(Icons.menu_book_outlined, size: 15, color: kBrass), const SizedBox(width: 8), Text(b, style: const TextStyle(fontSize: 13))]))),
+      ]),
+    );
+  }
+  Widget _examList() {
+    return FutureBuilder<List>(
+      future: Api.getExamPapers(),
+      builder: (c, snap) {
+        if (!snap.hasData) return const Center(child: CircularProgressIndicator(color: kForest));
+        final papers = snap.data!;
+        final years = <int, List>{};
+        for (final p in papers) {
+          final y = (p['year'] as int?) ?? 0;
+          years[y] = years[y] ?? [];
+          years[y]!.add(p);
+        }
+        final ys = years.keys.toList()..sort((a, b) => b.compareTo(a));
+        final children = <Widget>[];
+        for (final y in ys) {
+          children.add(Padding(padding: const EdgeInsets.fromLTRB(20, 12, 20, 8), child: Text('$y 年', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700))));
+          for (final p in years[y]!) {
+            children.add(Container(
+              margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 3),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(color: kPaper, borderRadius: BorderRadius.circular(10), boxShadow: [BoxShadow(color: kForest.withAlpha(10), blurRadius: 6, offset: Offset(0, 2))]),
+              child: InkWell(
+                onTap: () => _showDetail(p),
+                child: Row(children: [
+                  Container(width: 38, height: 38, decoration: BoxDecoration(color: kParchment, borderRadius: BorderRadius.circular(8)), child: Center(child: Text((p['subject'] ?? '').toString().length > 4 ? p['subject'].toString().substring(0, 3) : (p['subject'] ?? ''), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: kForest)))),
+                  const SizedBox(width: 12),
+                  Expanded(child: Text(p['title'] ?? '', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600))),
+                  if (p['hasAnswer'] == true) Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: kParchment, borderRadius: BorderRadius.circular(4)), child: const Text('含答案', style: TextStyle(fontSize: 11, color: kForest))),
+                  const Icon(Icons.chevron_right, color: kClay),
+                ]),
+              ),
+            ));
+          }
+        }
+        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: children);
+      },
+    );
+  }
+  void _showDetail(Map p) async {
+    Map? d;
+    try { d = await Api.getExamDetail(p['id'] ?? ''); } catch (_) {}
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (c) {
+        final w = <Widget>[
+          Text(p['title'] ?? '', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+          const Divider(height: 24),
+        ];
+        if (d != null && d!['content'] != null) {
+          w.add(const Text('【题目内容】', style: TextStyle(fontWeight: FontWeight.w700, color: kForest)));
+          w.add(const SizedBox(height: 8));
+          w.add(Text(d!['content'] ?? '', style: const TextStyle(height: 1.6)));
+        }
+        if (d != null && d!['answer'] != null) {
+          w.add(const SizedBox(height: 16));
+          w.add(const Text('【答案与解析】', style: TextStyle(fontWeight: FontWeight.w700, color: kBrass)));
+          w.add(const SizedBox(height: 8));
+          w.add(Text(d!['answer'] ?? '', style: const TextStyle(height: 1.6)));
+        }
+        return Dialog(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 600, maxHeight: 500),
+            padding: const EdgeInsets.all(20),
+            child: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: w)),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ======================== Tab 3: AI Chat ========================
+class _Msg{final bool me;final String t;const _Msg(this.me,this.t);}
+class ChatTab extends StatefulWidget{const ChatTab({super.key});@override State<ChatTab>createState()=>_ChatTabState();}
+class _ChatTabState extends State<ChatTab>{final _msgs=[_Msg(false,'你好！我是西南大王的AI考研助手。\n\n我可以帮你：\n• 分析院校数据\n• 解答专业课疑难\n• 制定复习计划\n• 陪你聊聊备考心态\n\n有什么想聊的？')];final _inp=TextEditingController(),_sc=ScrollController();bool _thinking=false;
+  void _send()async{final t=_inp.text.trim();if(t.isEmpty||_thinking)return;setState((){_msgs.add(_Msg(true,t));_inp.clear();_thinking=true;});_scroll();try{final r=await Api.chatSend(t);setState(()=>_msgs.add(_Msg(false,r)));}catch(e){setState(()=>_msgs.add(_Msg(false,'⚠️ ${e}')));}setState(()=>_thinking=false);_scroll();}
+  void _scroll(){WidgetsBinding.instance.addPostFrameCallback((_)=>_sc.animateTo(_sc.position.maxScrollExtent,duration:const Duration(milliseconds:300),curve:Curves.easeOut));}
+  @override Widget build(BuildContext c)=>Column(children:[Hdr(t:'AI 考研助手',s:'DeepSeek驱动 · 随时陪你聊备考'),Expanded(child:ListView.builder(controller:_sc,padding:const EdgeInsets.symmetric(horizontal:16),itemCount:_msgs.length,itemBuilder:(_,i)=>_bub(_msgs[i]))),if(_thinking)const Text('AI思考中…',style:TextStyle(fontSize:12,color:kClay)),Container(padding:const EdgeInsets.fromLTRB(16,8,16,12),decoration:const BoxDecoration(color:kPaper,border:Border(top:BorderSide(color:kMist))),child:Row(children:[Expanded(child:TextField(controller:_inp,decoration:const InputDecoration(hintText:'输入消息…',contentPadding:EdgeInsets.symmetric(horizontal:14,vertical:10)),onSubmitted:(_)=>_send())),const SizedBox(width:10),GestureDetector(onTap:_thinking?null:_send,child:Container(width:40,height:40,decoration:BoxDecoration(color:_thinking?kClay:kForest,borderRadius:BorderRadius.circular(10)),child:Icon(_thinking?Icons.hourglass_empty:Icons.send_rounded,color:Colors.white,size:18)))]))]);
+  Widget _bub(_Msg m)=>Padding(padding:const EdgeInsets.only(bottom:12),child:Row(crossAxisAlignment:CrossAxisAlignment.start,mainAxisAlignment:m.me?MainAxisAlignment.end:MainAxisAlignment.start,children:[if(!m.me)Container(width:32,height:32,margin:const EdgeInsets.only(top:2),decoration:BoxDecoration(color:kForest,borderRadius:BorderRadius.circular(8)),child:const Icon(Icons.auto_awesome,color:Colors.white,size:16)),if(!m.me)const SizedBox(width:10),Flexible(child:Container(padding:const EdgeInsets.symmetric(horizontal:14,vertical:10),decoration:BoxDecoration(color:m.me?kParchment:kPaper,borderRadius:BorderRadius.circular(12),border:Border.all(color:kMist)),child:Text(m.t,style:const TextStyle(fontSize:14,height:1.55)))),if(m.me)const SizedBox(width:10),if(m.me)Container(width:32,height:32,margin:const EdgeInsets.only(top:2),decoration:BoxDecoration(color:kBrass,borderRadius:BorderRadius.circular(8)),child:const Icon(Icons.person,color:Colors.white,size:16))]));
+  @override void dispose(){_inp.dispose();_sc.dispose();super.dispose();}
+}
+
+// ======================== Tab 4: Study Circle ========================
+class CircleTab extends StatefulWidget{final Map user;const CircleTab({super.key,required this.user});@override State<CircleTab>createState()=>_CircleTabState();}
+class _CircleTabState extends State<CircleTab>{List _posts=[];bool _loading=true;final _inp=TextEditingController();
+  @override void initState(){super.initState();_load();}
+  Future<void> _load()async{try{final r=await Api.getPosts();setState((){_posts=(r['posts']as List?)??[];_loading=false;});}catch(_){setState(()=>_loading=false);}}
+  Future<void> _post()async{final c=_inp.text.trim();if(c.isEmpty)return;try{final p=await Api.createPost(c);setState((){_posts.insert(0,p);_inp.clear();});}catch(_){}}
+  Future<void> _like(Map p)async{try{final r=await Api.toggleLike(p['id']??'');final i=_posts.indexOf(p);if(i>=0){final np=Map.from(_posts[i]);np['likesCount']=r['likesCount'];_posts[i]=np;setState((){});}}catch(_){}}
+  void _comment(Map p) {
+    showModalBottomSheet(context: context, isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (_) => _CommentSheet(post: p));
+  }
+  @override Widget build(BuildContext c) {
+    final inputRow = Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(color: kPaper, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: kForest.withAlpha(10), blurRadius: 6, offset: Offset(0, 2))]),
+      child: Row(children: [
+        Container(width: 36, height: 36, decoration: BoxDecoration(color: kParchment, borderRadius: BorderRadius.circular(18)), child: const Icon(Icons.edit_outlined, size: 18, color: kClay)),
+        const SizedBox(width: 10),
+        Expanded(child: TextField(controller: _inp, decoration: const InputDecoration(hintText: '分享你的考研动态…', border: InputBorder.none, contentPadding: EdgeInsets.symmetric(vertical: 8)), onSubmitted: (_) => _post())),
+        GestureDetector(onTap: _post, child: Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: BoxDecoration(color: kForest, borderRadius: BorderRadius.circular(8)), child: const Text('发布', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)))),
+      ]),
+    );
+    return SingleChildScrollView(padding: const EdgeInsets.only(bottom: 32), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Hdr(t: '研友圈', s: '考研人的互助社区'),
+      Padding(padding: const EdgeInsets.fromLTRB(20, 0, 20, 12), child: inputRow),
+      if (_loading) const Center(child: Padding(padding: EdgeInsets.zero, child: CircularProgressIndicator(color: kForest)))
+      else for (final p in _posts) _postCard(p),
+    ]));
+  }
+  Widget _postCard(Map p) {
+    final author = (p['author'] ?? {}) as Map;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: kPaper, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: kForest.withAlpha(10), blurRadius: 6, offset: Offset(0, 2))]),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(width: 36, height: 36, decoration: BoxDecoration(color: kParchment, borderRadius: BorderRadius.circular(10)), child: Center(child: Text((author['username'] ?? '?').toString()[0], style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: kForest)))),
+          const SizedBox(width: 10),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(author['username'] ?? '', style: const TextStyle(fontWeight: FontWeight.w700)),
+            Text(author['school'] ?? '考研人', style: const TextStyle(fontSize: 12, color: kClay)),
+          ])),
+        ]),
+        const SizedBox(height: 12),
+        Text(p['content'] ?? '', style: const TextStyle(height: 1.6)),
+        const SizedBox(height: 10),
+        Row(children: [
+          GestureDetector(onTap: () => _like(p), child: Row(children: [const Icon(Icons.favorite_border_outlined, size: 17, color: kClay), const SizedBox(width: 4), Text('${p['likesCount'] ?? 0}', style: const TextStyle(fontSize: 13, color: kClay))])),
+          const SizedBox(width: 20),
+          GestureDetector(onTap: () => _comment(p), child: Row(children: [const Icon(Icons.chat_bubble_outline, size: 17, color: kClay), const SizedBox(width: 4), Text('${p['commentCount'] ?? 0}', style: const TextStyle(fontSize: 13, color: kClay))])),
+        ]),
+      ]),
+    );
+  }
+  @override void dispose(){_inp.dispose();super.dispose();}
+}
+class _CommentSheet extends StatefulWidget{final Map post;const _CommentSheet({required this.post});@override State<_CommentSheet>createState()=>_CommentSheetState();}
+class _CommentSheetState extends State<_CommentSheet>{List? _c;final _inp=TextEditingController();bool _loading=true;
+  @override void initState(){super.initState();_load();}
+  Future<void> _load()async{try{_c=await Api.getComments(widget.post['id']??'');}catch(_){}setState(()=>_loading=false);}
+  Future<void> _add()async{final c=_inp.text.trim();if(c.isEmpty)return;try{final cmt=await Api.addComment(widget.post['id']??'',c);setState((){_c=[...(_c??[]),cmt];_inp.clear();});}catch(_){}}
+  @override Widget build(BuildContext c)=>Container(height:MediaQuery.of(c).size.height*0.5,padding:const EdgeInsets.all(16),child:Column(children:[Container(width:40,height:4,decoration:BoxDecoration(color:kMist,borderRadius:BorderRadius.circular(2))),const SizedBox(height:12),const Text('评论',style:TextStyle(fontWeight:FontWeight.w700,fontSize:16)),const Divider(),Expanded(child:_loading?const Center(child:CircularProgressIndicator(color:kForest)):_c==null||_c!.isEmpty?const Center(child:Text('暂无评论')):ListView.builder(itemCount:_c!.length,itemBuilder:(_,i){final c=_c![i];return ListTile(leading:CircleAvatar(backgroundColor:kParchment,child:Text((c['author']??{})['username']?.toString()??'?'[0]??'?',style:const TextStyle(color:kForest))),title:Text((c['author']??{})['username']??''),subtitle:Text(c['content']??''));})),Container(padding:const EdgeInsets.only(top:8),decoration:const BoxDecoration(border:Border(top:BorderSide(color:kMist))),child:Row(children:[Expanded(child:TextField(controller:_inp,decoration:const InputDecoration(hintText:'写评论…',border:InputBorder.none),onSubmitted:(_)=>_add())),GestureDetector(onTap:_add,child:Container(padding:const EdgeInsets.symmetric(horizontal:12,vertical:6),decoration:BoxDecoration(color:kForest,borderRadius:BorderRadius.circular(8)),child:const Text('发送',style:TextStyle(color:Colors.white,fontSize:13))))]))]));
+  @override void dispose(){_inp.dispose();super.dispose();}
+}
+
+// ======================== Tab 5: Friends ========================
+class FriendsTab extends StatefulWidget{final Map user;const FriendsTab({super.key,required this.user});@override State<FriendsTab>createState()=>_FriendsTabState();}
+class _FriendsTabState extends State<FriendsTab>{List _friends=[],_requests=[];bool _loading=true;_ChatState?_chat;
+  @override void initState(){super.initState();_load();}
+  Future<void> _load()async{try{_friends=await Api.getFriends();_requests=await Api.getFriendRequests();}catch(_){}setState(()=>_loading=false);}
+  @override Widget build(BuildContext c){if(_chat!=null)return _ChatView(state:_chat!,onBack:()=>setState(()=>_chat=null),userId:widget.user['id']??'');return SingleChildScrollView(padding:const EdgeInsets.only(bottom:32),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Hdr(t:'好友',s:'搜索大王号添加好友'),_addFriendField(),if(_requests.isNotEmpty)...[const SizedBox(height:12),Padding(padding:const EdgeInsets.symmetric(horizontal:20),child:Text('好友申请 (${_requests.length})',style:const TextStyle(fontWeight:FontWeight.w700,fontSize:15)))],for(final r in _requests)ListTile(leading:CircleAvatar(backgroundColor:kParchment,child:Text((r['fromUser']??{})['nickname']?.toString()??'?'[0]??'?',style:const TextStyle(color:kForest))),title:Text((r['fromUser']??{})['nickname']??''),subtitle:const Text('请求添加你为好友'),trailing:ElevatedButton(onPressed:()async{await Api.acceptRequest(r['id']??'');_load();},child:const Text('接受'))),const SizedBox(height:12),Padding(padding:const EdgeInsets.symmetric(horizontal:20),child:Text('好友列表 (${_friends.length})',style:const TextStyle(fontWeight:FontWeight.w700,fontSize:15))),if(_loading)const Center(child:CircularProgressIndicator(color:kForest))else for(final f in _friends)ListTile(leading:CircleAvatar(backgroundColor:kParchment,child:Text(f['nickname']?.toString()??'?'[0]??'?',style:const TextStyle(color:kForest))),title:Text(f['nickname']??''),subtitle:Text('大王号: ${f['dawangId']??''}'),trailing:TextButton(onPressed:()=>setState(()=>_chat=_ChatState(friendId:f['friendId']??'',friendName:f['nickname']??'')),child:const Text('发消息')))],));}
+  Widget _addFriendField(){final ctrl=TextEditingController();return Padding(padding:const EdgeInsets.symmetric(horizontal:20),child:TextField(controller:ctrl,decoration:InputDecoration(hintText:'输入大王号搜索好友…',prefixIcon:const Icon(Icons.search),suffixIcon:IconButton(icon:const Icon(Icons.person_add),onPressed:()async{try{await Api.sendFriendRequest(ctrl.text.trim());ctrl.clear();ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('好友申请已发送')));}catch(e){ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(e.toString())));}}))));}
+  @override void dispose(){super.dispose();}
+}
+
+class _ChatState{final String friendId,friendName;_ChatState({required this.friendId,required this.friendName});}
+class _ChatView extends StatefulWidget{final _ChatState state;final VoidCallback onBack;final String userId;const _ChatView({super.key,required this.state,required this.onBack,required this.userId});@override State<_ChatView>createState()=>_ChatViewState();}
+class _ChatViewState extends State<_ChatView>{List _msgs=[];final _inp=TextEditingController();final _sc=ScrollController();WebSocketChannel?_ws;bool _loading=true;
+  @override void initState(){super.initState();_load();_connect();}
+  Future<void> _load()async{try{_msgs=await Api.getMessages(widget.state.friendId);}catch(_){}setState(()=>_loading=false);}
+  void _connect(){_ws=WebSocketChannel.connect(Uri.parse('$kWsUrl?token=${Api._token??""}'));_ws!.stream.listen((d){final data=jsonDecode(d);if(data['from']==widget.state.friendId)setState(()=>_msgs.add({'senderId':data['from'],'content':data['content']}));});}
+  void _send(){final t=_inp.text.trim();if(t.isEmpty)return;setState((){_msgs.add({'senderId':widget.userId,'content':t});_inp.clear();});_ws?.sink.add(jsonEncode({'type':'message','to':widget.state.friendId,'content':t}));}
+  @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(title:Text(widget.state.friendName),leading:IconButton(icon:const Icon(Icons.arrow_back),onPressed:widget.onBack)),body:Column(children:[Expanded(child:_loading?const Center(child:CircularProgressIndicator(color:kForest)):ListView.builder(controller:_sc,padding:const EdgeInsets.all(16),itemCount:_msgs.length,itemBuilder:(_,i){final m=_msgs[i];final me=m['senderId']==widget.userId;return Padding(padding:const EdgeInsets.only(bottom:8),child:Row(mainAxisAlignment:me?MainAxisAlignment.end:MainAxisAlignment.start,children:[Container(padding:const EdgeInsets.symmetric(horizontal:14,vertical:10),decoration:BoxDecoration(color:me?kParchment:kPaper,borderRadius:BorderRadius.circular(12)),child:Text(m['content']??''))]));})),Container(padding:const EdgeInsets.all(12),decoration:const BoxDecoration(color:kPaper,border:Border(top:BorderSide(color:kMist))),child:Row(children:[Expanded(child:TextField(controller:_inp,decoration:const InputDecoration(hintText:'输入消息…',border:InputBorder.none),onSubmitted:(_)=>_send())),GestureDetector(onTap:_send,child:Container(width:40,height:40,decoration:BoxDecoration(color:kForest,borderRadius:BorderRadius.circular(10)),child:const Icon(Icons.send_rounded,color:Colors.white,size:18)))]))]));
+  @override void dispose(){_inp.dispose();_sc.dispose();_ws?.sink.close();super.dispose();}
+}
+
+// ======================== Tab 6: My ========================
+class MyTab extends StatefulWidget{final Map user;final VoidCallback onLogout;const MyTab({super.key,required this.user,required this.onLogout});@override State<MyTab>createState()=>_MyTabState();}
+class _MyTabState extends State<MyTab>{Map? _ai,_coins,_signIn;bool _signing=false;
+  @override void initState(){super.initState();_load();}
+  Future<void> _load()async{
+    try{_ai=await Api.getAiSummary();}catch(_){}
+    try{final d=await Api._get('/chat/coins/status');_coins=d as Map?;}catch(_){}
+    try{final d=await Api._get('/auth/sign-in/status');_signIn=d as Map?;}catch(_){}
+    if(mounted)setState((){});
+  }
+  Future<void> _doSignIn()async{
+    if(_signing)return;setState(()=>_signing=true);
+    try{await Api._post('/auth/sign-in',{});await _load();ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('签到成功！')));}
+    catch(e){ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('${e}')));}
+    setState(()=>_signing=false);
+  }
+  @override Widget build(BuildContext c) {
+    final profileCard = Container(
+      margin: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(color: kPaper, borderRadius: BorderRadius.circular(16), boxShadow: [BoxShadow(color: kForest.withAlpha(10), blurRadius: 6, offset: Offset(0, 2))]),
+      child: Column(children: [
+        CircleAvatar(radius: 40, backgroundColor: kParchment, child: Text((widget.user['nickname'] ?? '?').toString()[0], style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w800, color: kForest))),
+        const SizedBox(height: 12),
+        Text(widget.user['nickname'] ?? '', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 4),
+        Text('大王号: ${widget.user['dawangId'] ?? ''}', style: const TextStyle(color: kClay)),
+        const SizedBox(height: 8),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4), decoration: BoxDecoration(color: kParchment, borderRadius: BorderRadius.circular(20)), child: Text('Lv.${widget.user['level'] ?? 1}', style: const TextStyle(fontSize: 12, color: kForest))),
+          const SizedBox(width: 8),
+          Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4), decoration: BoxDecoration(color: kParchment, borderRadius: BorderRadius.circular(20)), child: Text('VIP${widget.user['vipLevel'] ?? 0}', style: const TextStyle(fontSize: 12, color: kBrass))),
+        ]),
+      ]),
+    );
+    Widget aiCard = const SizedBox.shrink();
+    if (_ai != null && _ai!['summary'] != null) {
+      final tags = (_ai!['tags'] as List?) ?? [];
+      aiCard = Container(
+        margin: const EdgeInsets.symmetric(horizontal: 20),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(color: kParchment, borderRadius: BorderRadius.circular(14), boxShadow: [BoxShadow(color: kForest.withAlpha(10), blurRadius: 6, offset: Offset(0, 2))]),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Row(children: [Icon(Icons.auto_awesome, color: kBrass, size: 16), SizedBox(width: 6), Text('AI 学情分析', style: TextStyle(fontWeight: FontWeight.w700, color: kForest))]),
+          const SizedBox(height: 8),
+          Text(_ai!['summary'] ?? '', style: const TextStyle(fontSize: 13, height: 1.5)),
+          if (tags.isNotEmpty) const SizedBox(height: 8),
+          if (tags.isNotEmpty) Wrap(spacing: 6, children: [for (final t in tags) Chip(label: Text(t, style: const TextStyle(fontSize: 11)), backgroundColor: kPaper)]),
+        ]),
+      );
+    }
+    return SingleChildScrollView(padding: const EdgeInsets.only(bottom: 32), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Hdr(t: '我的', s: '个人中心'),
+      profileCard,
+      aiCard,
+      const SizedBox(height: 20),
+      const Padding(padding: EdgeInsets.symmetric(horizontal: 20), child: Text('设置', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700))),
+      ListTile(leading: const Icon(Icons.lock_outline), title: const Text('账号安全'), trailing: const Icon(Icons.chevron_right), onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => AccountSecurityPage(user: widget.user)))),
+      ListTile(leading: const Icon(Icons.logout, color: kRed), title: const Text('退出登录', style: TextStyle(color: kRed)), onTap: () => showDialog(context: context, builder: (c) => AlertDialog(title: const Text('退出登录'), content: const Text('确定退出？'), actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('取消')), TextButton(onPressed: () { Navigator.pop(c); widget.onLogout(); }, child: const Text('退出', style: TextStyle(color: kRed)))]))),
+    ]));
+  }
+}
+
+class AccountSecurityPage extends StatefulWidget{final Map user;const AccountSecurityPage({super.key,required this.user});@override State<AccountSecurityPage>createState()=>_AccountSecurityPageState();}
+class _AccountSecurityPageState extends State<AccountSecurityPage>{
+  @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(title:const Text('账号安全')),body:ListView(children:[
+    ListTile(title:const Text('修改密码'),subtitle:const Text('输入原密码后设置新密码'),onTap:_changePw),
+    ListTile(title:const Text('修改大王号'),subtitle:Text('当前: ${widget.user['dawangId']??''}（每月限一次）'),onTap:_changeDid),
+  ]));
+  void _changePw(){final o=TextEditingController(),n=TextEditingController();showDialog(context:context,builder:(c)=>AlertDialog(title:const Text('修改密码'),content:Column(mainAxisSize:MainAxisSize.min,children:[TextField(controller:o,obscureText:true,decoration:const InputDecoration(labelText:'原密码')),const SizedBox(height:8),TextField(controller:n,obscureText:true,decoration:const InputDecoration(labelText:'新密码（至少6位）'))]),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('取消')),TextButton(onPressed:()async{try{await Api.changePassword(o.text,n.text);if(mounted){Navigator.pop(c);ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('密码已修改')));}}catch(e){ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(e.toString())));}},child:const Text('确认'))]));}
+  void _changeDid(){final ctrl=TextEditingController();showDialog(context:context,builder:(c)=>AlertDialog(title:const Text('修改大王号'),content:Column(mainAxisSize:MainAxisSize.min,children:[TextField(controller:ctrl,decoration:const InputDecoration(labelText:'新大王号（4-15字符）',helperText:'每月只能修改一次'))]),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('取消')),TextButton(onPressed:()async{try{await Api.changeDawangId(ctrl.text);if(mounted){Navigator.pop(c);ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('大王号已修改')));}}catch(e){ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(e.toString())));}},child:const Text('确认'))]));}
+}
